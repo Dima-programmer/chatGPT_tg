@@ -1,5 +1,7 @@
 from asyncio import run, sleep
 
+from TOKENS import token_bot
+
 import g4f.gui
 
 from aiogram import Bot, Dispatcher, types
@@ -7,7 +9,7 @@ from aiogram.filters import Command, Filter, CommandObject
 from aiogram.utils.keyboard import InlineKeyboardBuilder, InlineKeyboardButton
 from aiogram.exceptions import TelegramForbiddenError
 
-bot = Bot("6481771478:AAFPgulgtiGfqmdG_XQr-8te1YEIZtrMtQo")
+bot = Bot(token_bot)
 dp = Dispatcher()
 
 help_text = """
