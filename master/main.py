@@ -1,17 +1,19 @@
+import json
 import os
 from asyncio import run, sleep
 
-import g4f.gui
+import g4f
+from g4f.models import gpt_4o_mini
 
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command, Filter, CommandObject
 from aiogram.utils.keyboard import InlineKeyboardBuilder, InlineKeyboardButton
 from aiogram.exceptions import TelegramForbiddenError
-from dotenv import load_dotenv
+import logging
 
-load_dotenv('.env')
+logging.basicConfig(level=logging.INFO)
 
-bot = Bot(os.getenv('TOKEN'))
+bot = Bot("Your TOKEN")
 dp = Dispatcher()
 
 help_text = """
@@ -27,9 +29,20 @@ help_text = """
 
 <b>Если бот не отвечает в течении 5 мин.</b> попробуйте написать ещё раз.
 
-<b>Если бот завис</b>, то напишите /start. Если не сработало напишите:
+<b>Если бот завис</b>, то напишите /start. Если не сработало напишите админу(-ам):
 {}
 """
+
+help_moderators = """<b>Команды модератора</b>:
+
+/send <i>[сообщение]</i> - <b>отправит всем сообщение. </b>
+/send <i>[user-id] [сообщение]</i> - <b>отправляет ному человеку(в боте).</b> 
+/users <i>all</i> - <b>все пользователи и их user-id. </b>
+/users <i>[user-id]</i> - <b>инфа о пользователе. </b>
+/users - <b>сколько всего пользователей. </b>
+
+/op <i>[user-id]</i> - <b>назначить пользователя модератором.</b> 
+/deop <i>[user-id]</i> - <b>отозвать права модератора у модератора.</b>"""
 
 # settings_file = open('settings.json', 'a+')
 # src = settings_file.readline().strip().replace("'", '"')
@@ -47,7 +60,7 @@ db = dict()
 
 print(g4f.models._all_models)
 supported_models = [
-    'gpt-4', 'gpt-3.5-long',
+    'gpt-4o', 'gpt-4o-mini',
     'gpt-3.5-turbo',
     'Auto'
 ]
@@ -64,7 +77,7 @@ MODERATORS = []
 
 # ---------------------------------------------
 g4f.debug.logging = False
-g4f.debug.version_check = False
+g4f.debug.version_check = True
 
 
 # Using automatic a provider for the given model
@@ -94,17 +107,18 @@ class Command_chat(Filter):
     async def __call__(self, msg: types.Message) -> bool:
         if msg.chat.type == 'private':
             return await Command(commands=self.commands).__call__(msg, bot)
-        if msg.chat.type != 'private':
-            return await Command(commands=self.commands_chat).__call__(msg, bot)
+        if msg.chat.type != 'private' and (msg.text in self.commands_chat or msg.text in self.commands):
+            await msg.reply("Я работаю только в личных сообщениях (ЛС).")
+            return False
 
 
-async def username_to_id(username: str):
+async def username_to_id(username: str) -> int:
     if username.isnumeric():
         return username
     for id, value in db.items():
         if f"@{value['info'].username}" == username:
             return id
-    return False
+    return 0
 
 
 async def send_moderators(text):
@@ -124,6 +138,15 @@ async def send_moderators(text):
             await bot.send_message(chat_id=id, text=text, parse_mode='html')
         else:
             db[int(id)]["is_subscribed"] = False
+
+
+# Функция для обрезки истории разговора
+def trim_history(history, max_length=4096):
+    current_length = sum(len(message["content"]) for message in history)
+    while history and current_length > max_length:
+        removed_message = history.pop(0)
+        current_length -= len(removed_message["content"])
+    return history
 
 
 @dp.message(Command_chat(commands=['op']), Is_Admin())
@@ -174,10 +197,13 @@ async def send(msg: types.Message, command: CommandObject):
         text = text.split(' ', maxsplit=1)
         id = await username_to_id(text[0])
         if id:
-            await bot.send_message(chat_id=id, text=text[1])
-            await msg.answer(f'send message: \n<b>{text[1]}</b> to user {text[0]}', parse_mode='html')
+            try:
+                await bot.send_message(chat_id=id, text=text[1], parse_mode='html')
+                await msg.answer(f'send message: \n<b>{text[1]}</b> to user {text[0]}', parse_mode='html')
+            except:
+                await msg.answer(f'send message to user {text[0]}: <b>ERROR</b>', parse_mode='html')
         else:
-            await msg.answer('Неверное имя пользователя или id.')
+            await msg.reply('Неверное имя пользователя или id.')
     elif text:
         text = text
         await msg.answer(f'send message: \n<code>{text}</code>', parse_mode='html')
@@ -194,6 +220,8 @@ Info {user_id}:
     full name: <code>{info_user.full_name}</code>
     first name: <code>{info_user.first_name}</code>
     username: @{info_user.username}
+    is premium: {info_user.is_premium}
+    is bot: {info_user.is_bot}
     model: "{db[user_id]['model'] if db[user_id]['model'] != g4f.models.default else "Auto"}"
     language code: "{info_user.language_code}"
 ''', parse_mode='html')
@@ -213,11 +241,13 @@ async def get_users(msg: types.Message, command: CommandObject):
                 info_user = db[int(id_user)]["info"]
                 info_user: types.message.User
                 await msg.answer(f'''Info {id_user}:
-
+    
     id: <code>{id_user}</code>
     full name: <code>{info_user.full_name}</code>
     first name: <code>{info_user.first_name}</code>
     username: @{info_user.username}
+    is premium: {info_user.is_premium}
+    is bot: {info_user.is_bot}
     model: "{db[int(id_user)]['model'] if db[int(id_user)]['model'] != g4f.models.default else "Auto"}"
     language code: "{info_user.language_code}"
                 ''', parse_mode='html')
@@ -239,6 +269,8 @@ async def get_users(msg: types.Message, command: CommandObject):
 async def help_bot(msg: types.Message):
     admins_and_moderators = ', '.join([', '.join([f'<b>{a}</b>' for a in ADMINS if not a.isnumeric()]),
                                        ', '.join([f'<b>{m}</b>' for m in MODERATORS if not m.isnumeric()])])
+    if await Is_Admin().__call__(msg):
+        await msg.answer(help_moderators, parse_mode='html')
     await msg.reply(help_text.format(me.username, admins_and_moderators),
                     parse_mode='html')
 
@@ -248,7 +280,7 @@ async def register(msg: types.Message):
     first_started = msg.from_user.id not in db.keys()
 
     if msg.from_user.id not in db.keys():
-        db[msg.from_user.id] = {'dialog': [], 'is_dialog': False, 'model': g4f.models.default, "is_subscribed": False,
+        db[msg.from_user.id] = {'dialog': [], 'is_dialog': False, 'model': g4f.models.gpt_4o_mini, "is_subscribed": False,
                                 "info": msg.from_user}
         print(f'"{msg.from_user.full_name}" успешно зарегестрирован(-а)!')
         for id in ADMINS:
@@ -280,13 +312,16 @@ async def on_start(msg: types.Message, command: CommandObject):
     await msg.reply('Вы успешно вошли/зарегестрированны')
     await msg.answer(f'''Привет! 👋 Я <b>бот</b>, созданный на основе технологии ChatGPT-4, и я здесь, чтобы помочь тебе с различными задачами. Могу поддержать беседу на любую тему, помочь найти информацию, дать совет или просто развлечь интересным фактом. Напиши мне что-нибудь, и давай начнем наше знакомство! 😊
 
-Если ты не знаешь, с чего начать, вот несколько вещей, которые я могу делать:
+Если ты не знаешь, с чего начать, вот несколько вещей, которые я <b>могу делать</b>:
 - <b>📚 Отвечать на общие вопросы</b> и предоставлять объяснения
-- <b>🤔 Помогать с решением задач</b> и логических головоломок
 - <b>🌐 Предлагать ресурсы</b> для обучения и саморазвития
-- <b>📃 Писать и редактировать тексты</b>
+- <b>📝 Писать, редактировать тексты</b> и сочинять
 - <b>🎲 Предлагать игры</b> и активности для развлечения
-
+- <b>💻 Помогать по работе</b> и с написанием кода
+Но, к сожалению я <b>не могу делать</b> ещё несколько вещей:
+- <b>🚫⏰ Не могу длать все вещи связанные по времени</b>(например: погода, время, курс валют, и.т.п)
+- <b>🚫🧮 Не могу решать арефметические задачи</b>
+- <b>🚫🤬 Не могу употреблять нецензурную лексику и помогать вам с незаконными делами</b>
 Просто напиши свой запрос, и я постараюсь помочь!
 
 И кстати, твоя пригласительная ссылка: <code>t.me/{me.username}?start={msg.from_user.id}</code>
@@ -322,45 +357,33 @@ async def choice_model(callback: types.CallbackQuery):
             await callback.answer()
             try:
                 await dialog(msg.reply_to_message, msg,
-                             messages[:messages.index({"role": "assistant", "content": msg.text}) - 1])
+                             messages[:messages.index({"role": "user", "content": msg.reply_to_message.text + "\n\nОтвечай на русском."})])
             except Exception as ex:
                 print(ex)
                 await msg.delete()
-        elif callback.data.lower() == 'close':
-            await msg.delete()
-            await callback.answer()
+    if callback.data.lower() == 'close':
+        await msg.delete()
+        await callback.answer()
 
 
 @dp.message()
 async def dialog(msg: types.Message, msg_replace: types.Message = False, messages: g4f.Messages = False):
-    # print(msg.text)
-    if msg.content_type == 'new_chat_members' and msg.chat.type != 'private':
-        chat_title = msg.chat.title.replace("<", "").replace(">", "")
-        await msg.answer(f'Привет, <b>{msg.from_user.first_name}</b>, добро пожаловать в чат <b>{chat_title}</b>',
-                         parse_mode='html')
-    if msg.content_type == 'text':
-        await register(msg)
-    if msg.chat.type != 'private' and msg.content_type == 'text' and not msg_replace:
-        text = msg.text.split(' ', 1)
-        if text[0] == f'@{me.username}':
-            message = text[1]
-        else:
-            return
-    else:
-        message = msg.text
+    await register(msg)
+    if msg.chat.type != 'private':
+        await msg.reply("Я работаю только в личных сообщениях (ЛС).")
     if msg.content_type != 'text':
-        if msg.chat.type == 'private':
-            await msg.reply('Только текст!')
+        await msg.reply('Только текст!')
         return
     elif msg.text[0] == '/':
         return
     elif msg.text != '' and not db[msg.from_user.id]['is_dialog']:
         user_dict = db[msg.from_user.id]
         user_dict['is_dialog'] = True
-        message = {"role": "user", "content": message}
+        message_text = msg.text + "\n\nОтвечай на русском."
+        message = {"role": "user", "content": message_text}
         user_dict['dialog'].append(message)
         # Get the last n messages
-        context = user_dict['dialog'][-10:] if not messages else messages
+        context = trim_history(user_dict['dialog']) if not messages else messages
         user_dict['dialog'] = context
         # Change this number based on the model's context window
         if msg_replace:
@@ -371,12 +394,13 @@ async def dialog(msg: types.Message, msg_replace: types.Message = False, message
             response = await g4f.ChatCompletion.create_async(
                 model=user_dict['model'],
                 messages=context,
+                provider=g4f.Provider.You,
                 stream=False,
                 timeout=60 * 5
             )
             message = {"role": "assistant", "content": response}
             # print(response)
-            ikb = InlineKeyboardBuilder([[InlineKeyboardButton(text='Regenerate', callback_data='regenerate')]])
+            ikb = InlineKeyboardBuilder([[InlineKeyboardButton(text='Перегенирировать', callback_data='regenerate')]])
             if message['content'] and send_msg.text != context:
                 context.append(message)
                 try:
@@ -385,16 +409,21 @@ async def dialog(msg: types.Message, msg_replace: types.Message = False, message
                 except TelegramForbiddenError:
                     db[msg.from_user.id]['is_subscribed'] = False
         except Exception as ex:
-            ikb = InlineKeyboardBuilder([[InlineKeyboardButton(text='Close', callback_data='close')]])
+            ikb = InlineKeyboardBuilder([[InlineKeyboardButton(text='Перегенирировать', callback_data='regenerate'),
+                                          InlineKeyboardButton(text='Закрыть', callback_data='close')]])
+            print(ex)
             try:
+                # if send_msg.text == 'При генерации произошла ошибка! повторите попытку или используйте другую модель!':
+                # 	await send_msg.edit_text(
+                # 		'При повторной генерации произошла ошибка! повторите попытку или используйте другую модель!',
+                # 		reply_markup=ikb.as_markup(), reply_to_message_id=msg.message_id)
+                # else:
                 await send_msg.edit_text(
                     'При генерации произошла ошибка! повторите попытку или используйте другую модель!',
                     reply_markup=ikb.as_markup(), reply_to_message_id=msg.message_id)
-                if not msg_replace:
-                    await msg.answer(str(ex))
             except Exception as ex:
                 print(ex)
-            print(ex)
+            return
         user_dict['dialog'] = context
         ok = await msg.answer('Генерация окончена')
         await sleep(2)
@@ -406,7 +435,6 @@ async def dialog(msg: types.Message, msg_replace: types.Message = False, message
 
 # def has_special_char(s):
 #     return any(char in string.punctuation for char in s)
-
 
 async def main():
     global me
